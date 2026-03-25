@@ -3,8 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Generated data (all pipeline output)
-data/
+# Generated data (all pipeline output, keep .gitkeep)
+data/*
+!data/.gitkeep
 
 # uv
 *.egg-info/
