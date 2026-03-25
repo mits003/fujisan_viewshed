@@ -99,6 +99,10 @@ def fetch_mountains(limit: int | None = None) -> gpd.GeoDataFrame:
 
 
 def main():
+    # Step 1 of 3: Query Wikidata for "ご当地富士" (Local Fuji) mountains
+    # and save their metadata (name, coordinates, elevation) as GeoJSON.
+    # Output: data/mountains.geojson
+    # Next step: pipeline.download_dem (downloads DEM tiles for each mountain)
     parser = argparse.ArgumentParser(description="Fetch Local Fuji mountains from Wikidata")
     parser.add_argument(
         "--limit",

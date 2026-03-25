@@ -71,7 +71,7 @@ def download_tile(x: int, y: int, z: int, cache_dir: Path, delay: float = 0.5) -
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(resp.content)
 
-    time.sleep(delay)
+    time.sleep(delay)  # Rate-limit: this is the main bottleneck, not GDAL
     return cache_path
 
 
@@ -85,6 +85,7 @@ def tile_to_geotiff(
     ds_png = gdal.Open(str(png_path))
     rgb_array = np.stack([ds_png.GetRasterBand(i).ReadAsArray() for i in (1, 2, 3)], axis=-1)
     ds_png = None
+    # Custom RGB→elevation decoding; NumPy vectorised, no GDAL equivalent
     elevation = decode_dem_png(rgb_array)
 
     if np.all(np.isnan(elevation)):
@@ -165,6 +166,7 @@ def process_mountain(
         return None
 
     # Build VRT from tile GeoTIFFs
+    # Python bindings call the same C++ code as gdalbuildvrt CLI — no speed difference
     vrt_path = output_dir / f"{mid}.vrt"
     vrt_ds = gdal.BuildVRT(str(vrt_path), tile_tiff_paths)
     if vrt_ds is None:
@@ -172,7 +174,7 @@ def process_mountain(
         return None
     vrt_ds = None  # Close to flush
 
-    # Convert VRT to a single merged GeoTIFF
+    # Convert VRT to a single merged GeoTIFF (same perf as gdal_translate CLI)
     merged_path = output_dir / "geotiff" / f"{mid}_dem.tif"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
     gdal.Translate(
@@ -187,6 +189,11 @@ def process_mountain(
 
 
 def main():
+    # Step 2 of 3: Download GSI DEM10B PNG tiles for each mountain,
+    # decode RGB→elevation, and merge into a single GeoTIFF per mountain.
+    # Input:  data/mountains.geojson (from pipeline.fetch_mountains)
+    # Output: data/dem/geotiff/{id}_dem.tif
+    # Next step: pipeline.viewshed (runs viewshed analysis on each DEM)
     parser = argparse.ArgumentParser(description="Download GSI DEM tiles and create GeoTIFFs")
     parser.add_argument(
         "--input",
