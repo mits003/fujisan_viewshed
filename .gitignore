@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Generated data (all pipeline output)
+data/
+
+# uv
+*.egg-info/
+
+# OS
+.DS_Store
