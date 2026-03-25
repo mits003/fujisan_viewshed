@@ -1,0 +1,247 @@
+"""Step 2: Download GSI DEM10B PNG tiles and decode to GeoTIFFs.
+
+For each mountain in mountains.json, downloads GSI DEM10B PNG tiles covering
+a configurable radius, decodes RGB values to elevation, and merges into a
+single GeoTIFF suitable for gdal_viewshed.
+
+Reference: https://maps.gsi.go.jp/development/demtile.html
+"""
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from osgeo import gdal, osr
+
+from pipeline.utils.dem_decode import decode_dem_png
+from pipeline.utils.tiles import bounding_tiles, tile2deg
+
+
+def _features_to_dicts(features: list[dict]) -> list[dict]:
+    """Convert GeoJSON features to flat dicts for processing."""
+    results = []
+    for f in features:
+        props = f["properties"]
+        lon, lat = f["geometry"]["coordinates"]
+        results.append({**props, "lat": lat, "lon": lon})
+    return results
+
+# GSI DEM PNG tile URL template
+# Note: dem_png (not dem) is the correct path for PNG format tiles
+GSI_DEM_PNG_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"
+
+TILE_SIZE = 256
+ZOOM = 14
+
+# Suppress GDAL error messages for missing tiles
+gdal.UseExceptions()
+
+
+def download_tile(x: int, y: int, z: int, cache_dir: Path, delay: float = 0.5) -> Path | None:
+    """Download a single DEM PNG tile, using cache if available.
+
+    Returns the cached file path, or None if the tile doesn't exist (404).
+    """
+    import requests
+
+    cache_path = cache_dir / str(z) / str(x) / f"{y}.png"
+    if cache_path.exists():
+        return cache_path
+
+    url = GSI_DEM_PNG_URL.format(z=z, x=x, y=y)
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent": "FujisanViewshed/1.0 (https://github.com/fujisan-viewshed)"
+            },
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"  Warning: Failed to download tile {z}/{x}/{y}: {e}")
+        return None
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(resp.content)
+
+    time.sleep(delay)
+    return cache_path
+
+
+def tile_to_geotiff(
+    png_path: Path, x: int, y: int, z: int, output_path: Path
+) -> bool:
+    """Decode a DEM PNG tile and write as a georeferenced GeoTIFF.
+
+    Returns True if successful, False if the tile is all nodata.
+    """
+    ds_png = gdal.Open(str(png_path))
+    rgb_array = np.stack([ds_png.GetRasterBand(i).ReadAsArray() for i in (1, 2, 3)], axis=-1)
+    ds_png = None
+    elevation = decode_dem_png(rgb_array)
+
+    if np.all(np.isnan(elevation)):
+        return False
+
+    # Calculate geographic bounds
+    nw_lat, nw_lon = tile2deg(x, y, z)
+    se_lat, se_lon = tile2deg(x + 1, y + 1, z)
+
+    pixel_width = (se_lon - nw_lon) / TILE_SIZE
+    pixel_height = (nw_lat - se_lat) / TILE_SIZE  # positive value
+
+    # GeoTransform: (top_left_x, pixel_width, 0, top_left_y, 0, -pixel_height)
+    geotransform = (nw_lon, pixel_width, 0, nw_lat, 0, -pixel_height)
+
+    driver = gdal.GetDriverByName("GTiff")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ds = driver.Create(str(output_path), TILE_SIZE, TILE_SIZE, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform(geotransform)
+
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    ds.SetProjection(srs.ExportToWkt())
+
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(-9999.0)
+
+    # Replace NaN with nodata value
+    elevation_out = np.where(np.isnan(elevation), -9999.0, elevation)
+    band.WriteArray(elevation_out)
+    band.FlushCache()
+
+    ds = None  # Close the dataset
+    return True
+
+
+def process_mountain(
+    mountain: dict, radius_km: float, cache_dir: Path, output_dir: Path, delay: float
+) -> Path | None:
+    """Download and merge DEM tiles for a single mountain.
+
+    Returns the path to the merged GeoTIFF, or None on failure.
+    """
+    name = mountain["name"]
+    mid = mountain["id"]
+    lat = mountain["lat"]
+    lon = mountain["lon"]
+
+    print(f"\nProcessing {name} ({mid}) at [{lat:.4f}, {lon:.4f}]...")
+
+    x_min, x_max, y_min, y_max = bounding_tiles(lat, lon, radius_km, ZOOM)
+    total_tiles = (x_max - x_min + 1) * (y_max - y_min + 1)
+    print(f"  Tile range: x=[{x_min},{x_max}], y=[{y_min},{y_max}] ({total_tiles} tiles)")
+
+    # Download and convert tiles
+    tile_tiff_dir = output_dir / "tile_tiffs" / mid
+    tile_tiff_paths = []
+    downloaded = 0
+
+    for tx in range(x_min, x_max + 1):
+        for ty in range(y_min, y_max + 1):
+            png_path = download_tile(tx, ty, ZOOM, cache_dir, delay=delay)
+            if png_path is None:
+                continue
+
+            tiff_path = tile_tiff_dir / f"{tx}_{ty}.tif"
+            if tiff_path.exists() or tile_to_geotiff(png_path, tx, ty, ZOOM, tiff_path):
+                tile_tiff_paths.append(str(tiff_path))
+
+            downloaded += 1
+            if downloaded % 50 == 0:
+                print(f"  Downloaded {downloaded}/{total_tiles} tiles...")
+
+    print(f"  Downloaded {downloaded} tiles, {len(tile_tiff_paths)} valid GeoTIFFs")
+
+    if not tile_tiff_paths:
+        print(f"  Warning: No valid tiles for {name}")
+        return None
+
+    # Build VRT from tile GeoTIFFs
+    vrt_path = output_dir / f"{mid}.vrt"
+    vrt_ds = gdal.BuildVRT(str(vrt_path), tile_tiff_paths)
+    if vrt_ds is None:
+        print(f"  Error: Failed to build VRT for {name}")
+        return None
+    vrt_ds = None  # Close to flush
+
+    # Convert VRT to a single merged GeoTIFF
+    merged_path = output_dir / "geotiff" / f"{mid}_dem.tif"
+    merged_path.parent.mkdir(parents=True, exist_ok=True)
+    gdal.Translate(
+        str(merged_path),
+        str(vrt_path),
+        format="GTiff",
+        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+    )
+
+    print(f"  Merged GeoTIFF: {merged_path}")
+    return merged_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Download GSI DEM tiles and create GeoTIFFs")
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="data/mountains.geojson",
+        help="Input mountains GeoJSON file",
+    )
+    parser.add_argument(
+        "--radius-km",
+        type=float,
+        default=20.0,
+        help="Radius in km around each mountain (default: 20)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Delay between tile downloads in seconds (default: 0.5)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="data/dem",
+        help="Output directory for DEM data",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default="data/dem/tiles",
+        help="Cache directory for raw PNG tiles",
+    )
+    args = parser.parse_args()
+
+    mountains_path = Path(args.input)
+    if not mountains_path.exists():
+        print(f"Error: {mountains_path} not found. Run fetch_mountains first.")
+        sys.exit(1)
+
+    geojson = json.loads(mountains_path.read_text(encoding="utf-8"))
+    mountains = _features_to_dicts(geojson["features"])
+    print(f"Loaded {len(mountains)} mountains from {mountains_path}")
+
+    output_dir = Path(args.output_dir)
+    cache_dir = Path(args.cache_dir)
+
+    results = []
+    for mountain in mountains:
+        merged = process_mountain(mountain, args.radius_km, cache_dir, output_dir, args.delay)
+        if merged:
+            results.append({"id": mountain["id"], "name": mountain["name"], "dem_path": str(merged)})
+
+    print(f"\nDone. Created {len(results)}/{len(mountains)} GeoTIFFs.")
+    for r in results:
+        print(f"  - {r['name']}: {r['dem_path']}")
+
+
+if __name__ == "__main__":
+    main()
