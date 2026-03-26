@@ -1,0 +1,9 @@
+category,name,url,description
+Elevation Data,GSI DEM Tile Specification,https://maps.gsi.go.jp/development/demtile.html,国土地理院 標高タイル仕様 - DEM10B PNG/TXT encoding format and tile URLs
+Elevation Data,GSI DEM PNG Tiles,https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png,GSI DEM10B PNG tile endpoint (zoom 14)
+Elevation Data,GSI DEM TXT Tiles,https://cyberjapandata.gsi.go.jp/xyz/dem/{z}/{x}/{y}.txt,GSI DEM10B TXT tile endpoint (zoom 14)
+Mountain Metadata,Wikidata SPARQL Endpoint,https://query.wikidata.org/sparql,Wikidata SPARQL query service for fetching Local Fuji mountain data
+Mountain Metadata,Wikidata SPARQL Examples,https://www.wikidata.org/wiki/Wikidata:SPARQL_query_service/queries/examples,Wikidata SPARQL query examples and documentation
+Mountain Metadata,郷土富士 Wikipedia,https://ja.wikipedia.org/wiki/%E9%83%B7%E5%9C%9F%E5%AF%8C%E5%A3%AB,Wikipedia article listing Local Fuji mountains across Japan
+Tile Math,OpenStreetMap Slippy Map Tilenames,https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames,Slippy map tile coordinate conversion formulas
+DEM Decoding,Decoding PNG Elevation Tile (Observable),https://observablehq.com/@sw1227/decoding-png-elevation-tile,Reference implementation for GSI DEM PNG RGB-to-elevation decoding
