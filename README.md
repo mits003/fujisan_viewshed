@@ -77,10 +77,13 @@ AWS serverless deployment (S3 + CloudFront) managed by Terraform. See [deploymen
 # 1. Provision infrastructure
 cd deployment/terraform && terraform init && terraform apply
 
-# 2. Upload pipeline data to S3
-./scripts/upload-data.sh <S3_BUCKET_NAME> <CLOUDFRONT_DISTRIBUTION_ID>
+# 2. Configure environment
+cp .env.example .env  # then edit .env with your values
 
-# 3. Frontend deploys automatically via GitHub Actions on push to main
+# 3. Upload pipeline data to S3
+./scripts/upload-data.sh
+
+# 4. Frontend deploys automatically via GitHub Actions on push to main
 ```
 
 ## Data Sources

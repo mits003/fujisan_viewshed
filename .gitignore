@@ -18,5 +18,8 @@ deployment/terraform/*.tfstate.backup
 deployment/terraform/*.tfvars
 !deployment/terraform/*.tfvars.example
 
+# Environment
+.env
+
 # OS
 .DS_Store

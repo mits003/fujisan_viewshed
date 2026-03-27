@@ -49,13 +49,17 @@ terraform apply -var="project_name=my-fujisan" -var="aws_region=ap-northeast-1"
 
 ## 2. Upload Pipeline Data
 
-After running the data pipeline locally, upload the outputs to S3:
+Configure environment variables, then upload:
 
 ```bash
-./scripts/upload-data.sh <S3_BUCKET_NAME> <CLOUDFRONT_DISTRIBUTION_ID>
+# From project root
+cp .env.example .env
+# Edit .env with your S3_BUCKET_NAME and CLOUDFRONT_DISTRIBUTION_ID
+
+./scripts/upload-data.sh
 ```
 
-This uploads `data/fuji_viewshed.pmtiles` and `data/mountains.geojson`.
+The script reads from `.env` automatically. This uploads `data/fuji_viewshed.pmtiles` and `data/mountains.geojson`.
 
 ## 3. Configure GitHub Actions
 

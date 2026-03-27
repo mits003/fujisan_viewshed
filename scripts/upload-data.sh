@@ -4,7 +4,10 @@
 # Run this locally after the data pipeline completes.
 #
 # Usage:
-#   ./scripts/upload-data.sh <S3_BUCKET_NAME> [CLOUDFRONT_DISTRIBUTION_ID]
+#   ./scripts/upload-data.sh
+#
+# Reads S3_BUCKET_NAME and CLOUDFRONT_DISTRIBUTION_ID from .env or environment.
+# Copy .env.example to .env and fill in the values before running.
 #
 # Prerequisites:
 #   - AWS CLI configured with appropriate credentials
@@ -12,9 +15,23 @@
 
 set -euo pipefail
 
-BUCKET="${1:?Usage: $0 <S3_BUCKET_NAME> [CLOUDFRONT_DISTRIBUTION_ID]}"
-CF_DIST_ID="${2:-}"
-DATA_DIR="$(cd "$(dirname "$0")/.." && pwd)/data"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$PROJECT_DIR/data"
+
+# Load .env
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  set -a
+  source "$PROJECT_DIR/.env"
+  set +a
+elif [[ -z "${S3_BUCKET_NAME:-}" ]]; then
+  echo "Error: .env not found and S3_BUCKET_NAME is not set." >&2
+  echo "Run: cp .env.example .env  and fill in the values." >&2
+  exit 1
+fi
+
+BUCKET="$S3_BUCKET_NAME"
+CF_DIST_ID="${CLOUDFRONT_DISTRIBUTION_ID:-}"
 
 # Verify data files exist
 for f in fuji_viewshed.pmtiles mountains.geojson; do
