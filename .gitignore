@@ -11,5 +11,12 @@ web/public/data/
 # uv
 *.egg-info/
 
+# Terraform
+deployment/terraform/.terraform/
+deployment/terraform/*.tfstate
+deployment/terraform/*.tfstate.backup
+deployment/terraform/*.tfvars
+!deployment/terraform/*.tfvars.example
+
 # OS
 .DS_Store
