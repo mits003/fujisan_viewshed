@@ -19,6 +19,7 @@ const VIEWSHED_OUTLINE_LAYER = "viewshed-outline";
 export default function Map() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const markersRef = useRef<maplibregl.Marker[]>([]);
   const [mountains, setMountains] = useState<Mountain[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -114,6 +115,39 @@ export default function Map() {
     };
   }, []);
 
+  // Add summit markers when mountains data and map are both ready
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || mountains.length === 0) return;
+
+    // Clear existing markers
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+
+    mountains.forEach((mt) => {
+      const el = document.createElement("div");
+      el.style.width = "14px";
+      el.style.height = "14px";
+      el.style.backgroundColor = "#d97706";
+      el.style.border = "2px solid #ffffff";
+      el.style.borderRadius = "50%";
+      el.style.boxShadow = "0 1px 3px rgba(0,0,0,0.4)";
+      el.style.cursor = "pointer";
+      el.title = `${mt.fuji_alias} (${mt.name} ${mt.elevation}m)`;
+
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat(mt.coordinates)
+        .setPopup(
+          new maplibregl.Popup({ offset: 12 }).setHTML(
+            `<strong>${mt.fuji_alias}</strong><br/>${mt.name} ${mt.elevation}m`
+          )
+        )
+        .addTo(map);
+
+      markersRef.current.push(marker);
+    });
+  }, [mountains]);
+
   // Filter by selected mountain
   useEffect(() => {
     const map = mapRef.current;
@@ -126,7 +160,17 @@ export default function Map() {
     map.setFilter(VIEWSHED_FILL_LAYER, filter);
     map.setFilter(VIEWSHED_OUTLINE_LAYER, filter);
 
-    // Fly to selected mountain
+    // Highlight selected marker, fly to it
+    mountains.forEach((mt, i) => {
+      const marker = markersRef.current[i];
+      if (!marker) return;
+      const el = marker.getElement();
+      const isSelected = mt.id === selectedId;
+      el.style.width = isSelected ? "18px" : "14px";
+      el.style.height = isSelected ? "18px" : "14px";
+      el.style.backgroundColor = isSelected ? "#ef4444" : "#d97706";
+    });
+
     if (selectedId) {
       const mountain = mountains.find((m) => m.id === selectedId);
       if (mountain) {
