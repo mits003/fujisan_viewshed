@@ -6,7 +6,6 @@ __pycache__/
 # Generated data (all pipeline output, keep .gitkeep)
 data/*
 !data/.gitkeep
-web/public/data/
 
 # uv
 *.egg-info/
