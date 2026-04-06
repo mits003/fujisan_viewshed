@@ -43,8 +43,9 @@ uv run python -m pipeline.download_dem --radius-km 20
 ```
 
 Options:
- - `--radius-km N` — Radius around each peak in km (default: 20 for testing,  use 100 for full analysis) 
+- `--radius-km N` — Radius around each peak in km (default: 20 for testing, use 100 for full analysis)
 - `--delay N` — Seconds between tile downloads (default: 0.5)
+- `--workers N` — Parallel download threads per mountain (default: 4)
 - `--input PATH` — Input GeoJSON (default: `data/mountains.geojson`)
 - `--output-dir PATH` — Output directory (default: `data/dem`)
 
@@ -57,6 +58,7 @@ uv run python -m pipeline.viewshed
 ```
 
 Options:
+- `--workers N` — Parallel worker processes (default: 4)
 - `--input PATH` — Input GeoJSON (default: `data/mountains.geojson`)
 - `--dem-dir PATH` — DEM GeoTIFFs directory (default: `data/dem/geotiff`)
 - `--output-dir PATH` — Output directory (default: `data`)
@@ -105,7 +107,8 @@ pipeline/                        # Data pipeline (Python + GDAL)
 ├── generate_pmtiles.py          # GeoJSON to PMTiles converter
 └── utils/
     ├── tiles.py                 # Slippy map tile coordinate math
-    └── dem_decode.py            # GSI PNG RGB-to-elevation decoder
+    ├── dem_decode.py            # GSI PNG RGB-to-elevation decoder
+    └── geojson.py               # Shared GeoJSON utilities
 web/                             # Frontend (Next.js + MapLibre GL JS)
 ├── src/
 │   ├── app/                     # Next.js app router pages

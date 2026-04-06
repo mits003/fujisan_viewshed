@@ -11,23 +11,15 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from osgeo import gdal, osr
 
 from pipeline.utils.dem_decode import decode_dem_png
+from pipeline.utils.geojson import features_to_dicts
 from pipeline.utils.tiles import bounding_tiles, tile2deg
-
-
-def _features_to_dicts(features: list[dict]) -> list[dict]:
-    """Convert GeoJSON features to flat dicts for processing."""
-    results = []
-    for f in features:
-        props = f["properties"]
-        lon, lat = f["geometry"]["coordinates"]
-        results.append({**props, "lat": lat, "lon": lon})
-    return results
 
 # GSI DEM PNG tile URL template
 # Note: dem_png (not dem) is the correct path for PNG format tiles
@@ -123,7 +115,8 @@ def tile_to_geotiff(
 
 
 def process_mountain(
-    mountain: dict, radius_km: float, cache_dir: Path, output_dir: Path, delay: float
+    mountain: dict, radius_km: float, cache_dir: Path, output_dir: Path, delay: float,
+    workers: int = 4,
 ) -> Path | None:
     """Download and merge DEM tiles for a single mountain.
 
@@ -140,24 +133,39 @@ def process_mountain(
     total_tiles = (x_max - x_min + 1) * (y_max - y_min + 1)
     print(f"  Tile range: x=[{x_min},{x_max}], y=[{y_min},{y_max}] ({total_tiles} tiles)")
 
-    # Download and convert tiles
+    # Download tiles in parallel (I/O-bound), then convert to GeoTIFF in main thread (GDAL not thread-safe)
+    tile_coords = [
+        (tx, ty) for tx in range(x_min, x_max + 1) for ty in range(y_min, y_max + 1)
+    ]
+
+    # Phase 1: parallel download
+    downloaded_tiles: list[tuple[int, int, Path | None]] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(download_tile, tx, ty, ZOOM, cache_dir, delay): (tx, ty)
+            for tx, ty in tile_coords
+        }
+        done_count = 0
+        for future in as_completed(futures):
+            tx, ty = futures[future]
+            png_path = future.result()
+            downloaded_tiles.append((tx, ty, png_path))
+            done_count += 1
+            if done_count % 50 == 0:
+                print(f"  Downloaded {done_count}/{total_tiles} tiles...")
+
+    # Phase 2: sequential GeoTIFF conversion (GDAL is not thread-safe)
     tile_tiff_dir = output_dir / "tile_tiffs" / mid
     tile_tiff_paths = []
     downloaded = 0
 
-    for tx in range(x_min, x_max + 1):
-        for ty in range(y_min, y_max + 1):
-            png_path = download_tile(tx, ty, ZOOM, cache_dir, delay=delay)
-            if png_path is None:
-                continue
-
-            tiff_path = tile_tiff_dir / f"{tx}_{ty}.tif"
-            if tiff_path.exists() or tile_to_geotiff(png_path, tx, ty, ZOOM, tiff_path):
-                tile_tiff_paths.append(str(tiff_path))
-
-            downloaded += 1
-            if downloaded % 50 == 0:
-                print(f"  Downloaded {downloaded}/{total_tiles} tiles...")
+    for tx, ty, png_path in downloaded_tiles:
+        if png_path is None:
+            continue
+        downloaded += 1
+        tiff_path = tile_tiff_dir / f"{tx}_{ty}.tif"
+        if tiff_path.exists() or tile_to_geotiff(png_path, tx, ty, ZOOM, tiff_path):
+            tile_tiff_paths.append(str(tiff_path))
 
     print(f"  Downloaded {downloaded} tiles, {len(tile_tiff_paths)} valid GeoTIFFs")
 
@@ -225,6 +233,12 @@ def main():
         default="data/dem/tiles",
         help="Cache directory for raw PNG tiles",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel download threads per mountain (default: 4)",
+    )
     args = parser.parse_args()
 
     mountains_path = Path(args.input)
@@ -233,7 +247,7 @@ def main():
         sys.exit(1)
 
     geojson = json.loads(mountains_path.read_text(encoding="utf-8"))
-    mountains = _features_to_dicts(geojson["features"])
+    mountains = features_to_dicts(geojson["features"])
     print(f"Loaded {len(mountains)} mountains from {mountains_path}")
 
     output_dir = Path(args.output_dir)
@@ -241,7 +255,7 @@ def main():
 
     results = []
     for mountain in mountains:
-        merged = process_mountain(mountain, args.radius_km, cache_dir, output_dir, args.delay)
+        merged = process_mountain(mountain, args.radius_km, cache_dir, output_dir, args.delay, args.workers)
         if merged:
             results.append({"id": mountain["id"], "name": mountain["name"], "dem_path": str(merged)})
 

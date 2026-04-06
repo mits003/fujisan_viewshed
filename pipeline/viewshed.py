@@ -15,21 +15,14 @@ import argparse
 import json
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from osgeo import gdal, ogr, osr
 
+from pipeline.utils.geojson import features_to_dicts
+
 gdal.UseExceptions()
-
-
-def _features_to_dicts(features: list[dict]) -> list[dict]:
-    """Convert GeoJSON features to flat dicts for processing."""
-    results = []
-    for f in features:
-        props = f["properties"]
-        lon, lat = f["geometry"]["coordinates"]
-        results.append({**props, "lat": lat, "lon": lon})
-    return results
 
 # Viewshed parameters from design doc
 OBSERVER_HEIGHT = 2.0  # meters above mountain peak
@@ -180,6 +173,10 @@ def main():
         "--output-dir", type=str, default="data",
         help="Output directory",
     )
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Number of parallel worker processes (default: 4)",
+    )
     args = parser.parse_args()
 
     mountains_path = Path(args.input)
@@ -188,17 +185,28 @@ def main():
         sys.exit(1)
 
     geojson = json.loads(mountains_path.read_text(encoding="utf-8"))
-    mountains = _features_to_dicts(geojson["features"])
+    mountains = features_to_dicts(geojson["features"])
     print(f"Loaded {len(mountains)} mountains")
 
     dem_dir = Path(args.dem_dir)
     output_dir = Path(args.output_dir)
 
     results = []
-    for mountain in mountains:
-        result = process_mountain(mountain, dem_dir, output_dir)
-        if result:
-            results.append(result)
+    if args.workers == 1:
+        for mountain in mountains:
+            result = process_mountain(mountain, dem_dir, output_dir)
+            if result:
+                results.append(result)
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(process_mountain, mountain, dem_dir, output_dir): mountain
+                for mountain in mountains
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    results.append(result)
 
     print(f"\nDone. Processed {len(results)}/{len(mountains)} mountains.")
     for r in results:
