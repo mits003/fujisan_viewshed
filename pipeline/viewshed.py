@@ -19,7 +19,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from osgeo import gdal, ogr, osr
-
 from pipeline.utils.geojson import features_to_dicts
 
 gdal.UseExceptions()
@@ -192,21 +191,15 @@ def main():
     output_dir = Path(args.output_dir)
 
     results = []
-    if args.workers == 1:
-        for mountain in mountains:
-            result = process_mountain(mountain, dem_dir, output_dir)
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(process_mountain, mountain, dem_dir, output_dir): mountain
+            for mountain in mountains
+        }
+        for future in as_completed(futures):
+            result = future.result()
             if result:
                 results.append(result)
-    else:
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {
-                executor.submit(process_mountain, mountain, dem_dir, output_dir): mountain
-                for mountain in mountains
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    results.append(result)
 
     print(f"\nDone. Processed {len(results)}/{len(mountains)} mountains.")
     for r in results:

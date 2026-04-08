@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from osgeo import gdal, osr
+from tqdm import tqdm
 
 from pipeline.utils.dem_decode import decode_dem_png
 from pipeline.utils.geojson import features_to_dicts
@@ -145,14 +146,12 @@ def process_mountain(
             executor.submit(download_tile, tx, ty, ZOOM, cache_dir, delay): (tx, ty)
             for tx, ty in tile_coords
         }
-        done_count = 0
-        for future in as_completed(futures):
-            tx, ty = futures[future]
-            png_path = future.result()
-            downloaded_tiles.append((tx, ty, png_path))
-            done_count += 1
-            if done_count % 50 == 0:
-                print(f"  Downloaded {done_count}/{total_tiles} tiles...")
+        with tqdm(total=total_tiles, desc=f"  Downloading [{mid}]", unit="tile") as pbar:
+            for future in as_completed(futures):
+                tx, ty = futures[future]
+                png_path = future.result()
+                downloaded_tiles.append((tx, ty, png_path))
+                pbar.update(1)
 
     # Phase 2: sequential GeoTIFF conversion (GDAL is not thread-safe)
     tile_tiff_dir = output_dir / "tile_tiffs" / mid
@@ -167,7 +166,7 @@ def process_mountain(
         if tiff_path.exists() or tile_to_geotiff(png_path, tx, ty, ZOOM, tiff_path):
             tile_tiff_paths.append(str(tiff_path))
 
-    print(f"  Downloaded {downloaded} tiles, {len(tile_tiff_paths)} valid GeoTIFFs")
+    print(f"  {downloaded} tiles downloaded, {len(tile_tiff_paths)} valid GeoTIFFs")
 
     if not tile_tiff_paths:
         print(f"  Warning: No valid tiles for {name}")
@@ -254,7 +253,7 @@ def main():
     cache_dir = Path(args.cache_dir)
 
     results = []
-    for mountain in mountains:
+    for mountain in tqdm(mountains, desc="DEM download", unit="mountain"):
         merged = process_mountain(mountain, args.radius_km, cache_dir, output_dir, args.delay, args.workers)
         if merged:
             results.append({"id": mountain["id"], "name": mountain["name"], "dem_path": str(merged)})
