@@ -4,12 +4,18 @@ For each mountain in mountains.json, downloads GSI DEM10B PNG tiles covering
 a configurable radius, decodes RGB values to elevation, and merges into a
 single GeoTIFF suitable for gdal_viewshed.
 
+Supports two modes:
+  - Legacy (default): per-mountain download, convert, merge
+  - Tile index mode (--tile-index): streaming download → convert → upload to S3,
+    using a pre-built DuckDB tile index for deduplication
+
 Reference: https://maps.gsi.go.jp/development/demtile.html
 """
 
 import argparse
 import json
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -115,6 +121,10 @@ def tile_to_geotiff(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Legacy mode: per-mountain download + merge (unchanged)
+# ---------------------------------------------------------------------------
+
 def process_mountain(
     mountain: dict, radius_km: float, cache_dir: Path, output_dir: Path, delay: float,
     workers: int = 4,
@@ -195,6 +205,150 @@ def process_mountain(
     return merged_path
 
 
+# ---------------------------------------------------------------------------
+# Tile index mode: streaming download → convert → upload to S3
+# ---------------------------------------------------------------------------
+
+def _process_tile_streaming(
+    z: int, x: int, y: int,
+    cache_dir: Path, delay: float,
+    s3_client, s3_bucket: str, s3_prefix: str,
+) -> str | None:
+    """Download, convert, upload a single tile. Returns s3_key or None.
+
+    Runs in main thread (GDAL not thread-safe for tile_to_geotiff).
+    Download is done inline since we process one tile at a time for streaming.
+    """
+    from pipeline.utils.s3_tiles import tile_s3_key, upload_tile
+
+    s3_key = tile_s3_key(s3_prefix, z, x, y)
+
+    # Download PNG
+    png_path = download_tile(x, y, z, cache_dir, delay)
+    if png_path is None:
+        return None
+
+    # Convert to GeoTIFF in temp location
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tiff_path = Path(tmpdir) / f"{x}_{y}.tif"
+        if not tile_to_geotiff(png_path, x, y, z, tiff_path):
+            return None
+
+        # Upload to S3
+        if not upload_tile(s3_client, tiff_path, s3_bucket, s3_key):
+            return None
+
+    # Delete cached PNG to save space (S3 is the archive)
+    png_path.unlink(missing_ok=True)
+
+    return s3_key
+
+
+def process_tiles_streaming(
+    db_path: Path, cache_dir: Path, delay: float,
+    s3_bucket: str, s3_prefix: str,
+    batch_size: int = 100,
+) -> None:
+    """Stream-process all pending tiles: download → convert → upload → update status.
+
+    Uses DuckDB tile index for progress tracking. Processes tiles sequentially
+    (GDAL not thread-safe) but downloads benefit from PNG cache.
+    """
+    import duckdb
+
+    from pipeline.utils.s3_tiles import create_client, list_existing_tiles, tile_s3_key
+
+    con = duckdb.connect(str(db_path))
+    s3_client = create_client()
+
+    # On cold start, reconcile DuckDB with S3 for any 'in_progress' tiles
+    in_progress = con.execute(
+        "SELECT zoom, x, y FROM tiles WHERE status = 'in_progress'"
+    ).fetchall()
+    if in_progress:
+        print(f"Recovering {len(in_progress)} in-progress tiles...")
+        existing = list_existing_tiles(s3_client, s3_bucket, s3_prefix)
+        for z, x, y in in_progress:
+            key = tile_s3_key(s3_prefix, z, x, y)
+            new_status = "done" if key in existing else "pending"
+            con.execute(
+                "UPDATE tiles SET status = ?, updated_at = current_timestamp "
+                "WHERE zoom = ? AND x = ? AND y = ?",
+                [new_status, z, x, y],
+            )
+
+    # Get all pending tiles
+    pending = con.execute(
+        "SELECT zoom, x, y FROM tiles WHERE status = 'pending'"
+    ).fetchall()
+    total = len(pending)
+    if total == 0:
+        print("All tiles already processed.")
+        con.close()
+        return
+
+    print(f"Processing {total} pending tiles (streaming to s3://{s3_bucket}/{s3_prefix})...")
+
+    done_batch: list[tuple[int, int, int, str]] = []
+    error_batch: list[tuple[int, int, int]] = []
+
+    with tqdm(total=total, desc="Tiles", unit="tile") as pbar:
+        for z, x, y in pending:
+            # Mark in_progress
+            con.execute(
+                "UPDATE tiles SET status = 'in_progress', updated_at = current_timestamp "
+                "WHERE zoom = ? AND x = ? AND y = ?",
+                [z, x, y],
+            )
+
+            s3_key = _process_tile_streaming(
+                z, x, y, cache_dir, delay, s3_client, s3_bucket, s3_prefix,
+            )
+
+            if s3_key:
+                done_batch.append((z, x, y, s3_key))
+            else:
+                error_batch.append((z, x, y))
+
+            pbar.update(1)
+
+            # Batch update DuckDB every batch_size tiles
+            if len(done_batch) + len(error_batch) >= batch_size:
+                _flush_status(con, done_batch, error_batch)
+                done_batch.clear()
+                error_batch.clear()
+
+    # Final flush
+    _flush_status(con, done_batch, error_batch)
+
+    done_total = con.execute("SELECT COUNT(*) FROM tiles WHERE status = 'done'").fetchone()[0]
+    error_total = con.execute("SELECT COUNT(*) FROM tiles WHERE status = 'error'").fetchone()[0]
+    print(f"\nDone. {done_total} tiles uploaded, {error_total} errors.")
+    con.close()
+
+
+def _flush_status(
+    con, done: list[tuple[int, int, int, str]], errors: list[tuple[int, int, int]],
+) -> None:
+    """Batch update tile statuses in DuckDB."""
+    for z, x, y, s3_key in done:
+        con.execute(
+            "UPDATE tiles SET status = 'done', s3_key = ?, updated_at = current_timestamp "
+            "WHERE zoom = ? AND x = ? AND y = ?",
+            [s3_key, z, x, y],
+        )
+    for z, x, y in errors:
+        con.execute(
+            "UPDATE tiles SET status = 'error', updated_at = current_timestamp "
+            "WHERE zoom = ? AND x = ? AND y = ?",
+            [z, x, y],
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     # Step 2 of 3: Download GSI DEM10B PNG tiles for each mountain,
     # decode RGB→elevation, and merge into a single GeoTIFF per mountain.
@@ -238,8 +392,46 @@ def main():
         default=4,
         help="Number of parallel download threads per mountain (default: 4)",
     )
+    # Tile index mode arguments
+    parser.add_argument(
+        "--tile-index",
+        type=str,
+        default=None,
+        help="Path to DuckDB tile index (enables streaming mode)",
+    )
+    parser.add_argument(
+        "--s3-bucket",
+        type=str,
+        default=None,
+        help="S3 bucket for tile storage (required with --tile-index)",
+    )
+    parser.add_argument(
+        "--s3-prefix",
+        type=str,
+        default="dem_tiff",
+        help="S3 key prefix for tile GeoTIFFs (default: dem_tiff)",
+    )
     args = parser.parse_args()
 
+    # Tile index mode: streaming download → S3
+    if args.tile_index:
+        if not args.s3_bucket:
+            print("Error: --s3-bucket is required when using --tile-index")
+            sys.exit(1)
+
+        db_path = Path(args.tile_index)
+        if not db_path.exists():
+            print(f"Error: {db_path} not found. Run build_tile_index first.")
+            sys.exit(1)
+
+        cache_dir = Path(args.cache_dir)
+        process_tiles_streaming(
+            db_path, cache_dir, args.delay,
+            args.s3_bucket, args.s3_prefix,
+        )
+        return
+
+    # Legacy mode: per-mountain download + merge
     mountains_path = Path(args.input)
     if not mountains_path.exists():
         print(f"Error: {mountains_path} not found. Run fetch_mountains first.")
