@@ -4,6 +4,11 @@ For each mountain in mountains.json, runs gdal_viewshed on the DEM GeoTIFF
 to produce a binary visibility raster, then polygonizes the visible areas
 to GeoJSON.
 
+Supports two modes:
+  - Legacy (default): reads pre-merged DEM GeoTIFFs from local disk
+  - Tile index mode (--tile-index): builds VRT from S3-hosted tiles,
+    materializes locally via gdal.Translate, runs viewshed, cleans up
+
 Viewshed parameters (from design doc):
 - Observer placed at mountain peak (oz=2.0m above peak)
 - Target is human observer on ground (tz=1.6m eye level)
@@ -13,9 +18,10 @@ Viewshed parameters (from design doc):
 
 import argparse
 import json
+import math
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import tempfile
 from pathlib import Path
 
 from osgeo import gdal, ogr, osr
@@ -28,6 +34,8 @@ OBSERVER_HEIGHT = 2.0  # meters above mountain peak
 TARGET_HEIGHT = 1.6  # average human eye level
 MAX_DISTANCE = 100000  # 100km in meters
 CURV_COEFF = 0.85714  # standard curvature/refraction
+
+ZOOM = 14
 
 
 def run_viewshed(dem_path: Path, output_path: Path, lon: float, lat: float) -> bool:
@@ -122,6 +130,10 @@ def polygonize_viewshed(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Legacy mode: per-mountain from local DEM GeoTIFF
+# ---------------------------------------------------------------------------
+
 def process_mountain(mountain: dict, dem_dir: Path, output_dir: Path) -> dict | None:
     """Run viewshed + polygonize for a single mountain."""
     mid = mountain["id"]
@@ -154,6 +166,168 @@ def process_mountain(mountain: dict, dem_dir: Path, output_dir: Path) -> dict | 
     }
 
 
+# ---------------------------------------------------------------------------
+# Tile index mode: S3-backed VRT → local Translate → viewshed
+# ---------------------------------------------------------------------------
+
+def _configure_gdal_for_s3() -> None:
+    """Set GDAL config options for efficient S3 VRT reads."""
+    gdal.SetConfigOption("GDAL_MAX_DATASET_POOL_SIZE", "450")
+    gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+    gdal.SetConfigOption("GDAL_HTTP_MULTIPLEX", "YES")
+    gdal.SetConfigOption("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
+
+
+def _build_s3_vrt(
+    tile_keys: list[str], s3_bucket: str, vrt_path: Path,
+) -> bool:
+    """Build a VRT referencing tiles on S3 via /vsis3/ paths.
+
+    Validates each tile is a readable raster before including it.
+    Invalid tiles (corrupt, empty, or missing) are skipped with a warning.
+    Returns True on success.
+    """
+    vsis3_paths = [f"/vsis3/{s3_bucket}/{key}" for key in tile_keys]
+
+    # Filter out invalid tiles that would cause Translate to fail
+    valid_paths = []
+    skipped = 0
+    for path in vsis3_paths:
+        try:
+            ds = gdal.Open(path)
+            if ds is not None:
+                valid_paths.append(path)
+                ds = None
+            else:
+                skipped += 1
+        except RuntimeError:
+            skipped += 1
+    if skipped:
+        print(f"  Warning: Skipped {skipped} invalid tiles")
+
+    if not valid_paths:
+        return False
+
+    vrt_ds = gdal.BuildVRT(str(vrt_path), valid_paths)
+    if vrt_ds is None:
+        return False
+    vrt_ds = None  # Close to flush
+    return True
+
+
+def _materialize_and_viewshed(
+    mountain: dict, vrt_path: Path, output_dir: Path, tmpdir: str,
+) -> dict | None:
+    """Translate S3 VRT to local GeoTIFF, run viewshed, clean up.
+
+    The merged GeoTIFF is temporary — only viewshed results are kept.
+    """
+    mid = mountain["id"]
+    name = mountain["name"]
+    lat = mountain["lat"]
+    lon = mountain["lon"]
+
+    # Materialize VRT to local merged GeoTIFF
+    merged_path = Path(tmpdir) / f"{mid}_dem.tif"
+    print(f"  Materializing DEM from S3 VRT...")
+    gdal.Translate(
+        str(merged_path),
+        str(vrt_path),
+        format="GTiff",
+        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+    )
+
+    if not merged_path.exists():
+        print(f"  Error: Failed to materialize VRT for {name}")
+        return None
+
+    # Run viewshed on local file
+    viewshed_path = output_dir / "viewshed" / f"{mid}_viewshed.tif"
+    if not run_viewshed(merged_path, viewshed_path, lon, lat):
+        return None
+
+    # Polygonize
+    geojson_path = output_dir / "geojson" / f"{mid}_viewshed.geojson"
+    if not polygonize_viewshed(viewshed_path, geojson_path, mountain):
+        return None
+
+    # Clean up local merged DEM (viewshed raster kept for debugging)
+    merged_path.unlink(missing_ok=True)
+
+    return {
+        "id": mid,
+        "name": name,
+        "viewshed_raster": str(viewshed_path),
+        "geojson": str(geojson_path),
+    }
+
+
+def process_mountains_s3(
+    mountains: list[dict], db_path: Path,
+    s3_bucket: str, s3_prefix: str, output_dir: Path,
+) -> list[dict]:
+    """Process all mountains using S3-backed VRT tile index mode.
+
+    Mountains are sorted by geographic grid cell for S3 cache locality.
+    Each mountain is processed sequentially: build VRT → Translate → viewshed → cleanup.
+    Local storage per mountain: ~1.5GB (merged GeoTIFF + viewshed raster).
+    """
+    import duckdb
+
+    from pipeline.utils.s3_tiles import tile_s3_key
+
+    _configure_gdal_for_s3()
+
+    con = duckdb.connect(str(db_path), read_only=True)
+
+    # Sort mountains by grid cell for S3 cache locality
+    sorted_mountains = sorted(mountains, key=lambda m: (math.floor(m["lat"]), math.floor(m["lon"])))
+
+    results = []
+    for mountain in sorted_mountains:
+        mid = mountain["id"]
+        name = mountain["name"]
+        print(f"\nProcessing {name} ({mid})...")
+
+        # Query tile index for this mountain's tiles
+        rows = con.execute(
+            "SELECT DISTINCT t.zoom, t.x, t.y, t.s3_key "
+            "FROM tile_mountain tm "
+            "JOIN tiles t ON tm.zoom = t.zoom AND tm.x = t.x AND tm.y = t.y "
+            "WHERE tm.mountain_id = ? AND t.status = 'done'",
+            [mid],
+        ).fetchall()
+
+        if not rows:
+            print(f"  Warning: No tiles available for {name}, skipping")
+            continue
+
+        # Build s3_keys — use stored key or reconstruct from coordinates
+        tile_keys = [
+            row[3] if row[3] else tile_s3_key(s3_prefix, row[0], row[1], row[2])
+            for row in rows
+        ]
+        print(f"  {len(tile_keys)} tiles from S3")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vrt_path = Path(tmpdir) / f"{mid}.vrt"
+            if not _build_s3_vrt(tile_keys, s3_bucket, vrt_path):
+                print(f"  Error: Failed to build S3 VRT for {name}")
+                continue
+
+            result = _materialize_and_viewshed(mountain, vrt_path, output_dir, tmpdir)
+            if result:
+                results.append(result)
+
+    con.close()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     # Step 3 of 3: Run gdal_viewshed on each mountain's DEM, then polygonize
     # the visible areas to GeoJSON for map display.
@@ -176,6 +350,19 @@ def main():
         "--workers", type=int, default=4,
         help="Number of parallel worker processes (default: 4)",
     )
+    # Tile index mode arguments
+    parser.add_argument(
+        "--tile-index", type=str, default=None,
+        help="Path to DuckDB tile index (enables S3 VRT mode)",
+    )
+    parser.add_argument(
+        "--s3-bucket", type=str, default=None,
+        help="S3 bucket for tile storage (required with --tile-index)",
+    )
+    parser.add_argument(
+        "--s3-prefix", type=str, default="dem_tiff",
+        help="S3 key prefix for tile GeoTIFFs (default: dem_tiff)",
+    )
     args = parser.parse_args()
 
     mountains_path = Path(args.input)
@@ -186,6 +373,30 @@ def main():
     geojson = json.loads(mountains_path.read_text(encoding="utf-8"))
     mountains = features_to_dicts(geojson["features"])
     print(f"Loaded {len(mountains)} mountains")
+
+    # Tile index mode: S3-backed VRT
+    if args.tile_index:
+        if not args.s3_bucket:
+            print("Error: --s3-bucket is required when using --tile-index")
+            sys.exit(1)
+
+        db_path = Path(args.tile_index)
+        if not db_path.exists():
+            print(f"Error: {db_path} not found. Run build_tile_index first.")
+            sys.exit(1)
+
+        output_dir = Path(args.output_dir)
+        results = process_mountains_s3(
+            mountains, db_path, args.s3_bucket, args.s3_prefix, output_dir,
+        )
+
+        print(f"\nDone. Processed {len(results)}/{len(mountains)} mountains.")
+        for r in results:
+            print(f"  - {r['name']}: {r['geojson']}")
+        return
+
+    # Legacy mode: local DEM GeoTIFFs
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     dem_dir = Path(args.dem_dir)
     output_dir = Path(args.output_dir)
