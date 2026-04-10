@@ -8,10 +8,13 @@ AWS serverless deployment using S3 + CloudFront.
 Client (Browser) --HTTPS--> CloudFront ---> S3
                                             ├── Next.js static export
                                             ├── data/fuji_viewshed.pmtiles
-                                            └── data/mountains.geojson
+                                            ├── data/mountains.geojson
+                                            └── dem_tiff/{z}/{x}/{y}.tif  (pipeline tile storage)
 ```
 
-- **S3**: Private bucket, accessed only via CloudFront OAC
+- **S3**: Private bucket, serves dual purpose:
+  - Static site hosting via CloudFront OAC (frontend + pipeline output)
+  - DEM tile storage for the tile index pipeline (`dem_tiff/` prefix)
 - **CloudFront**: CDN with cache behaviors optimized for each content type
   - `_next/*` — 1-year immutable cache (hashed assets)
   - `data/*` — 1-day cache, compression disabled for PMTiles Range request compatibility

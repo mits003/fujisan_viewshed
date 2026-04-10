@@ -103,7 +103,7 @@ uv run python -m pipeline.generate_pmtiles
 
 ## Deployment
 
-AWS serverless deployment (S3 + CloudFront) managed by Terraform. See [deployment/README.md](deployment/README.md) for full setup instructions.
+AWS serverless deployment (S3 + CloudFront) managed by Terraform. The S3 bucket serves dual purpose: static site hosting via CloudFront and DEM tile storage for the tile index pipeline. See [deployment/README.md](deployment/README.md) for full setup instructions.
 
 ```bash
 # 1. Provision infrastructure
@@ -116,6 +116,17 @@ cp .env.example .env  # then edit .env with your values
 ./scripts/upload-data.sh
 
 # 4. Frontend deploys automatically via GitHub Actions on push to main
+```
+
+If resources already exist in AWS (e.g. from a previous apply), import them into Terraform state:
+
+```bash
+cd deployment/terraform
+terraform import aws_s3_bucket.site fujisan-viewshed
+terraform import aws_cloudfront_origin_access_control.site <OAC_ID>
+terraform import aws_cloudfront_cache_policy.data_files <POLICY_ID>
+terraform import aws_cloudfront_cache_policy.immutable_assets <POLICY_ID>
+terraform import aws_cloudfront_distribution.site <DISTRIBUTION_ID>
 ```
 
 ## Data Sources

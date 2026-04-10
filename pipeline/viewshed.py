@@ -184,10 +184,32 @@ def _build_s3_vrt(
 ) -> bool:
     """Build a VRT referencing tiles on S3 via /vsis3/ paths.
 
+    Validates each tile is a readable raster before including it.
+    Invalid tiles (corrupt, empty, or missing) are skipped with a warning.
     Returns True on success.
     """
     vsis3_paths = [f"/vsis3/{s3_bucket}/{key}" for key in tile_keys]
-    vrt_ds = gdal.BuildVRT(str(vrt_path), vsis3_paths)
+
+    # Filter out invalid tiles that would cause Translate to fail
+    valid_paths = []
+    skipped = 0
+    for path in vsis3_paths:
+        try:
+            ds = gdal.Open(path)
+            if ds is not None:
+                valid_paths.append(path)
+                ds = None
+            else:
+                skipped += 1
+        except RuntimeError:
+            skipped += 1
+    if skipped:
+        print(f"  Warning: Skipped {skipped} invalid tiles")
+
+    if not valid_paths:
+        return False
+
+    vrt_ds = gdal.BuildVRT(str(vrt_path), valid_paths)
     if vrt_ds is None:
         return False
     vrt_ds = None  # Close to flush

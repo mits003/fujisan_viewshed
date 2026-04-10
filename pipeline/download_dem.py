@@ -234,6 +234,17 @@ def _process_tile_streaming(
         if not tile_to_geotiff(png_path, x, y, z, tiff_path):
             return None
 
+        # Validate GeoTIFF before uploading
+        try:
+            ds = gdal.Open(str(tiff_path))
+            if ds is None:
+                print(f"  Warning: Invalid GeoTIFF for tile {z}/{x}/{y}, skipping")
+                return None
+            ds = None
+        except RuntimeError:
+            print(f"  Warning: Unreadable GeoTIFF for tile {z}/{x}/{y}, skipping")
+            return None
+
         # Upload to S3
         if not upload_tile(s3_client, tiff_path, s3_bucket, s3_key):
             return None
