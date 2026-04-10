@@ -6,7 +6,8 @@ Web-based mapping application that visualizes the "viewshed" (visible areas) of 
 
 - **Frontend:** Next.js + MapLibre GL JS with PMTiles
 - **Infrastructure:** AWS S3 + CloudFront (fully static/serverless)
-- **Data Pipeline:** Python + GDAL + tippecanoe
+- **Data Pipeline:** Python + GDAL + DuckDB + tippecanoe
+- **Tile Storage:** S3-backed tile index for deduplicated DEM management
 
 ## Data Pipeline
 
@@ -34,36 +35,65 @@ Options:
 - `--limit N` — Max number of mountains (default: 3)
 - `--output PATH` — Output JSON path (default: `data/mountains.json`)
 
-### Step 2: Download DEM & Create GeoTIFFs
+### Step 2: Build Tile Index (optional)
+
+Builds a DuckDB tile index that maps tile coordinates to mountains, enabling deduplication and S3-backed workflows.
+
+```bash
+uv run python -m pipeline.build_tile_index --radius-km 20
+```
+
+Options:
+- `--radius-km N` — Radius around each peak in km (default: 20)
+- `--input PATH` — Input GeoJSON (default: `data/mountains.geojson`)
+- `--output PATH` — Output DuckDB database (default: `data/tile_index.duckdb`)
+
+### Step 3: Download DEM & Create GeoTIFFs
 
 Downloads GSI DEM10B PNG tiles, decodes RGB to elevation, and merges into GeoTIFFs per mountain.
 
+**Local mode (default):**
 ```bash
 uv run python -m pipeline.download_dem --radius-km 20
+```
+
+**Tile index mode (S3-backed, requires Step 2):**
+```bash
+uv run python -m pipeline.download_dem --tile-index data/tile_index.duckdb --s3-bucket my-bucket
 ```
 
 Options:
 - `--radius-km N` — Radius around each peak in km (default: 20 for testing, use 100 for full analysis)
 - `--delay N` — Seconds between tile downloads (default: 0.5)
 - `--workers N` — Parallel download threads per mountain (default: 4)
+- `--tile-index PATH` — DuckDB tile index for streaming S3 mode
+- `--s3-bucket NAME` — S3 bucket for tile storage (used with `--tile-index`)
 - `--input PATH` — Input GeoJSON (default: `data/mountains.geojson`)
 - `--output-dir PATH` — Output directory (default: `data/dem`)
 
-### Step 3: Viewshed Analysis & Polygonize
+### Step 4: Viewshed Analysis & Polygonize
 
 Runs `gdal_viewshed` on each mountain's DEM and polygonizes visible areas to GeoJSON.
 
+**Local mode (default):**
 ```bash
 uv run python -m pipeline.viewshed
 ```
 
+**Tile index mode (S3-backed VRT, requires Step 2-3 with tile index):**
+```bash
+uv run python -m pipeline.viewshed --tile-index data/tile_index.duckdb --s3-bucket my-bucket
+```
+
 Options:
 - `--workers N` — Parallel worker processes (default: 4)
+- `--tile-index PATH` — DuckDB tile index for S3-backed VRT mode
+- `--s3-bucket NAME` — S3 bucket for tile storage (used with `--tile-index`)
 - `--input PATH` — Input GeoJSON (default: `data/mountains.geojson`)
 - `--dem-dir PATH` — DEM GeoTIFFs directory (default: `data/dem/geotiff`)
 - `--output-dir PATH` — Output directory (default: `data`)
 
-### Step 4: Generate PMTiles
+### Step 5: Generate PMTiles
 
 Converts viewshed GeoJSON polygons into a single PMTiles file for the web frontend.
 
@@ -102,13 +132,15 @@ See [referenced_sources.csv](referenced_sources.csv) for the full list of refere
 ```
 pipeline/                        # Data pipeline (Python + GDAL)
 ├── fetch_mountains.py           # Wikidata SPARQL fetcher
+├── build_tile_index.py          # DuckDB tile index builder
 ├── download_dem.py              # GSI DEM downloader + GeoTIFF builder
 ├── viewshed.py                  # Viewshed analysis + polygonize
 ├── generate_pmtiles.py          # GeoJSON to PMTiles converter
 └── utils/
     ├── tiles.py                 # Slippy map tile coordinate math
     ├── dem_decode.py            # GSI PNG RGB-to-elevation decoder
-    └── geojson.py               # Shared GeoJSON utilities
+    ├── geojson.py               # Shared GeoJSON utilities
+    └── s3_tiles.py              # S3 batch upload/download utilities
 web/                             # Frontend (Next.js + MapLibre GL JS)
 ├── src/
 │   ├── app/                     # Next.js app router pages
