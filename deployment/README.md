@@ -26,6 +26,8 @@ Client (Browser) --HTTPS--> CloudFront ---> S3
 - [AWS CLI](https://aws.amazon.com/cli/) configured with credentials
 - GitHub repository with Actions enabled (for CI/CD)
 
+For first-time AWS/Terraform setup, see [SETUP.md](SETUP.md).
+
 ## 1. Provision Infrastructure
 
 ```bash
