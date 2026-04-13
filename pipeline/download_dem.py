@@ -24,48 +24,64 @@ import numpy as np
 from osgeo import gdal, osr
 from tqdm import tqdm
 
+from pipeline.constants import GSI_DEM_PNG_URL, TILE_SIZE, ZOOM
+from pipeline.defaults import (
+    CACHE_DIR,
+    DEFAULT_WORKERS,
+    DEM_OUTPUT_DIR,
+    DOWNLOAD_DELAY,
+    MAX_RETRIES,
+    MOUNTAINS_GEOJSON,
+    RADIUS_KM,
+    REQUEST_TIMEOUT,
+    S3_PREFIX,
+)
 from pipeline.utils.dem_decode import decode_dem_png
 from pipeline.utils.geojson import features_to_dicts
 from pipeline.utils.tiles import bounding_tiles, tile2deg
-
-# GSI DEM PNG tile URL template
-# Note: dem_png (not dem) is the correct path for PNG format tiles
-GSI_DEM_PNG_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"
-
-TILE_SIZE = 256
-ZOOM = 14
 
 # Suppress GDAL error messages for missing tiles
 gdal.UseExceptions()
 
 
-def download_tile(x: int, y: int, z: int, cache_dir: Path, delay: float = 0.5) -> Path | None:
+def download_tile(
+    x: int, y: int, z: int, cache_dir: Path, delay: float = 0.5,
+    max_retries: int = MAX_RETRIES, force: bool = False,
+) -> Path | None:
     """Download a single DEM PNG tile, using cache if available.
 
     Returns the cached file path, or None if the tile doesn't exist (404).
+    Retries transient errors with exponential backoff.
     """
     import requests
 
     cache_path = cache_dir / str(z) / str(x) / f"{y}.png"
-    if cache_path.exists():
+    if not force and cache_path.exists():
         return cache_path
 
     url = GSI_DEM_PNG_URL.format(z=z, x=x, y=y)
 
-    try:
-        resp = requests.get(
-            url,
-            timeout=30,
-            headers={
-                "User-Agent": "FujisanViewshed/1.0 (https://github.com/fujisan-viewshed)"
-            },
-        )
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"  Warning: Failed to download tile {z}/{x}/{y}: {e}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={
+                    "User-Agent": "FujisanViewshed/1.0 (https://github.com/fujisan-viewshed)"
+                },
+            )
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            break
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                wait = min(2 ** attempt, 60)
+                print(f"  Retry {attempt + 1}/{max_retries} for tile {z}/{x}/{y} (wait {wait}s): {e}")
+                time.sleep(wait)
+            else:
+                print(f"  Error: Failed to download tile {z}/{x}/{y} after {max_retries} attempts: {e}")
+                return None
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(resp.content)
@@ -213,6 +229,7 @@ def _process_tile_streaming(
     z: int, x: int, y: int,
     cache_dir: Path, delay: float,
     s3_client, s3_bucket: str, s3_prefix: str,
+    force: bool = False,
 ) -> str | None:
     """Download, convert, upload a single tile. Returns s3_key or None.
 
@@ -224,7 +241,7 @@ def _process_tile_streaming(
     s3_key = tile_s3_key(s3_prefix, z, x, y)
 
     # Download PNG
-    png_path = download_tile(x, y, z, cache_dir, delay)
+    png_path = download_tile(x, y, z, cache_dir, delay, force=force)
     if png_path is None:
         return None
 
@@ -259,6 +276,7 @@ def process_tiles_streaming(
     db_path: Path, cache_dir: Path, delay: float,
     s3_bucket: str, s3_prefix: str,
     batch_size: int = 100,
+    force: bool = False,
 ) -> None:
     """Stream-process all pending tiles: download → convert → upload → update status.
 
@@ -314,6 +332,7 @@ def process_tiles_streaming(
 
             s3_key = _process_tile_streaming(
                 z, x, y, cache_dir, delay, s3_client, s3_bucket, s3_prefix,
+                force=force,
             )
 
             if s3_key:
@@ -335,6 +354,13 @@ def process_tiles_streaming(
     done_total = con.execute("SELECT COUNT(*) FROM tiles WHERE status = 'done'").fetchone()[0]
     error_total = con.execute("SELECT COUNT(*) FROM tiles WHERE status = 'error'").fetchone()[0]
     print(f"\nDone. {done_total} tiles uploaded, {error_total} errors.")
+
+    if error_total > 0:
+        errors = con.execute("SELECT zoom, x, y FROM tiles WHERE status = 'error'").fetchall()
+        print(f"\nFailed tiles ({len(errors)}):")
+        for z, x, y in errors:
+            print(f"  {z}/{x}/{y}")
+
     con.close()
 
 
@@ -370,37 +396,37 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="data/mountains.geojson",
+        default=MOUNTAINS_GEOJSON,
         help="Input mountains GeoJSON file",
     )
     parser.add_argument(
         "--radius-km",
         type=float,
-        default=20.0,
+        default=RADIUS_KM,
         help="Radius in km around each mountain (default: 20)",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.5,
+        default=DOWNLOAD_DELAY,
         help="Delay between tile downloads in seconds (default: 0.5)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="data/dem",
+        default=DEM_OUTPUT_DIR,
         help="Output directory for DEM data",
     )
     parser.add_argument(
         "--cache-dir",
         type=str,
-        default="data/dem/tiles",
+        default=CACHE_DIR,
         help="Cache directory for raw PNG tiles",
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=DEFAULT_WORKERS,
         help="Number of parallel download threads per mountain (default: 4)",
     )
     # Tile index mode arguments
@@ -419,8 +445,18 @@ def main():
     parser.add_argument(
         "--s3-prefix",
         type=str,
-        default="dem_tiff",
+        default=S3_PREFIX,
         help="S3 key prefix for tile GeoTIFFs (default: dem_tiff)",
+    )
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="Reset error tiles to pending before processing (tile-index mode)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download and reprocess all tiles (tile-index mode)",
     )
     args = parser.parse_args()
 
@@ -436,9 +472,28 @@ def main():
             sys.exit(1)
 
         cache_dir = Path(args.cache_dir)
+
+        # Reset tile statuses if --force or --retry-errors
+        if args.force or args.retry_errors:
+            import duckdb
+
+            con = duckdb.connect(str(db_path))
+            if args.force:
+                count = con.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+                con.execute("UPDATE tiles SET status = 'pending', s3_key = NULL")
+                print(f"Force mode: reset all {count} tiles to pending.")
+            elif args.retry_errors:
+                count = con.execute(
+                    "SELECT COUNT(*) FROM tiles WHERE status = 'error'"
+                ).fetchone()[0]
+                con.execute("UPDATE tiles SET status = 'pending' WHERE status = 'error'")
+                print(f"Retry mode: reset {count} error tiles to pending.")
+            con.close()
+
         process_tiles_streaming(
             db_path, cache_dir, args.delay,
             args.s3_bucket, args.s3_prefix,
+            force=args.force,
         )
         return
 
