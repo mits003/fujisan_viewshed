@@ -16,10 +16,10 @@ from pathlib import Path
 
 import duckdb
 
+from pipeline.constants import ZOOM
+from pipeline.defaults import MOUNTAINS_GEOJSON, RADIUS_KM, TILE_INDEX_DB
 from pipeline.utils.geojson import features_to_dicts
 from pipeline.utils.tiles import bounding_tiles
-
-ZOOM = 14
 
 
 def build_index(mountains: list[dict], radius_km: float, db_path: Path) -> duckdb.DuckDBPyConnection:
@@ -113,19 +113,19 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="data/mountains.geojson",
+        default=MOUNTAINS_GEOJSON,
         help="Input mountains GeoJSON file",
     )
     parser.add_argument(
         "--radius-km",
         type=float,
-        default=20.0,
+        default=RADIUS_KM,
         help="Radius in km around each mountain (default: 20)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="data/dem/tiles.duckdb",
+        default=TILE_INDEX_DB,
         help="Output DuckDB database path",
     )
     args = parser.parse_args()

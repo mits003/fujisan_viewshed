@@ -25,17 +25,11 @@ import tempfile
 from pathlib import Path
 
 from osgeo import gdal, ogr, osr
+from pipeline.constants import CURV_COEFF, MAX_DISTANCE, OBSERVER_HEIGHT, TARGET_HEIGHT, ZOOM
+from pipeline.defaults import DEFAULT_WORKERS, MOUNTAINS_GEOJSON, S3_PREFIX
 from pipeline.utils.geojson import features_to_dicts
 
 gdal.UseExceptions()
-
-# Viewshed parameters from design doc
-OBSERVER_HEIGHT = 2.0  # meters above mountain peak
-TARGET_HEIGHT = 1.6  # average human eye level
-MAX_DISTANCE = 100000  # 100km in meters
-CURV_COEFF = 0.85714  # standard curvature/refraction
-
-ZOOM = 14
 
 
 def run_viewshed(dem_path: Path, output_path: Path, lon: float, lat: float) -> bool:
@@ -335,7 +329,7 @@ def main():
     # Output: data/viewshed/{id}_viewshed.tif + data/geojson/{id}_viewshed.geojson
     parser = argparse.ArgumentParser(description="Run viewshed analysis and polygonize")
     parser.add_argument(
-        "--input", type=str, default="data/mountains.geojson",
+        "--input", type=str, default=MOUNTAINS_GEOJSON,
         help="Input mountains GeoJSON file",
     )
     parser.add_argument(
@@ -347,7 +341,7 @@ def main():
         help="Output directory",
     )
     parser.add_argument(
-        "--workers", type=int, default=4,
+        "--workers", type=int, default=DEFAULT_WORKERS,
         help="Number of parallel worker processes (default: 4)",
     )
     # Tile index mode arguments
@@ -360,7 +354,7 @@ def main():
         help="S3 bucket for tile storage (required with --tile-index)",
     )
     parser.add_argument(
-        "--s3-prefix", type=str, default="dem_tiff",
+        "--s3-prefix", type=str, default=S3_PREFIX,
         help="S3 key prefix for tile GeoTIFFs (default: dem_tiff)",
     )
     args = parser.parse_args()

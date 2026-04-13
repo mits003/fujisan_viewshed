@@ -14,13 +14,15 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from pipeline.defaults import S3_REGION
+
 logger = logging.getLogger(__name__)
 
 # Adaptive retry handles S3 throttling (503 SlowDown) automatically
 _S3_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
 
-def create_client(region: str = "ap-northeast-1") -> boto3.client:
+def create_client(region: str = S3_REGION) -> boto3.client:
     """Create a boto3 S3 client with adaptive retry."""
     return boto3.client("s3", region_name=region, config=_S3_CONFIG)
 

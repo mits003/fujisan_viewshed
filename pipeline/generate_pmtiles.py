@@ -15,13 +15,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pipeline.defaults import GEOJSON_DIR, PMTILES_MAX_ZOOM, PMTILES_MIN_ZOOM, PMTILES_OUTPUT
+
 
 def generate_pmtiles(
     geojson_dir: Path,
     output_path: Path,
     *,
-    min_zoom: int = 4,
-    max_zoom: int = 12,
+    min_zoom: int = PMTILES_MIN_ZOOM,
+    max_zoom: int = PMTILES_MAX_ZOOM,
 ) -> bool:
     """Merge all viewshed GeoJSON files into a single PMTiles archive.
 
@@ -72,20 +74,20 @@ def main():
     parser.add_argument(
         "--input-dir",
         type=str,
-        default="data/geojson",
+        default=GEOJSON_DIR,
         help="Directory containing viewshed GeoJSON files",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="data/fuji_viewshed.pmtiles",
+        default=PMTILES_OUTPUT,
         help="Output PMTiles file path",
     )
     parser.add_argument(
-        "--min-zoom", type=int, default=4, help="Minimum zoom level (default: 4)"
+        "--min-zoom", type=int, default=PMTILES_MIN_ZOOM, help="Minimum zoom level (default: 4)"
     )
     parser.add_argument(
-        "--max-zoom", type=int, default=12, help="Maximum zoom level (default: 12)"
+        "--max-zoom", type=int, default=PMTILES_MAX_ZOOM, help="Maximum zoom level (default: 12)"
     )
     args = parser.parse_args()
 
